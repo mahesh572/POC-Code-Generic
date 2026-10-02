@@ -380,3 +380,30 @@ NotificationPolicyResolver
    ┌──────┼──────┐
    ▼      ▼      ▼
  EMAIL   SMS   IN_APP
+
+
+
+
+WorkflowService
+    │
+    ├── createWorkflow()
+    ├── updateWorkflow()
+    ├── activateWorkflow()
+    ├── deactivateWorkflow()
+    ├── createNewVersion()
+    └── deleteWorkflow()
+             │
+             ├── WorkflowStateService
+             │       ├── addState()
+             │       ├── updateState()
+             │       └── deleteState()
+             │
+             ├── WorkflowTransitionService
+             │       ├── addTransition()
+             │       ├── updateTransition()
+             │       └── deleteTransition()
+             │
+             └── WorkflowTransitionEventService
+                     ├── addEvent()
+                     ├── updateEvent()
+                     └── deleteEvent()
