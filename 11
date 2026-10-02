@@ -1,1 +1,382 @@
+public interface NotificationContextProvider {
 
+    boolean supports(String entityType);
+
+    NotificationContext build(
+            WorkflowNotificationEvent workflowEvent,
+            NotificationEvent notificationEvent
+    );
+}
+
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class CandidateNotificationContextProvider
+        implements NotificationContextProvider {
+
+    private final CandidateRepository candidateRepository;
+
+    private final CompanyEmailSettingsRepository
+            companyEmailSettingsRepository;
+
+    private final PlatformConfigRepository
+            platformConfigRepository;
+
+    private final PlatformEmailSettingsRepository
+            platformEmailSettingsRepository;
+
+    private final PlaceholderEngine placeholderEngine;
+
+    private final ResetTokenService resetTokenService;
+
+
+    @Override
+    public boolean supports(String entityType) {
+        return "CANDIDATE".equals(entityType);
+    }
+
+
+    @Override
+    public NotificationContext build(
+            WorkflowNotificationEvent workflowEvent,
+            NotificationEvent notificationEvent
+    ) {
+
+        Candidate candidate =
+                candidateRepository
+                        .findById(workflowEvent.getEntityId())
+                        .orElseThrow(() ->
+                                new IllegalArgumentException(
+                                        "Candidate not found: "
+                                                + workflowEvent.getEntityId()
+                                )
+                        );
+
+        Company company = candidate.getCompany();
+
+        User user = candidate.getUser();
+
+
+        var companyEmailSettings =
+                companyEmailSettingsRepository
+                        .findByCompanyId(company.getId())
+                        .orElse(null);
+
+
+        var platformConfig =
+                platformConfigRepository
+                        .findById(1L)
+                        .orElseThrow(() ->
+                                new IllegalStateException(
+                                        "PlatformConfig not initialized"
+                                )
+                        );
+
+
+        var platformEmailSettings =
+                platformEmailSettingsRepository
+                        .findActive()
+                        .orElse(null);
+
+
+        // =====================================================
+        // EVENT SPECIFIC CONFIGURATION
+        // =====================================================
+
+        Set<NotificationPlaceholder> placeholders =
+                resolvePlaceholders(notificationEvent);
+
+
+        Map<String, Object> runtimeValues =
+                resolveRuntimeValues(
+                        notificationEvent,
+                        candidate,
+                        user
+                );
+
+
+        // =====================================================
+        // RESOLVE PLACEHOLDERS
+        // =====================================================
+
+        Map<String, Object> variables =
+                placeholderEngine.resolveAll(
+                        placeholders,
+                        ResolutionContext.builder()
+                                .company(company)
+                                .candidate(candidate)
+                                .companyEmailSettings(
+                                        companyEmailSettings
+                                )
+                                .platformConfig(
+                                        platformConfig
+                                )
+                                .platformEmailSettings(
+                                        platformEmailSettings
+                                )
+                                .runtimeValues(
+                                        runtimeValues
+                                )
+                                .build()
+                );
+
+
+        // =====================================================
+        // GENERIC NOTIFICATION CONTEXT
+        // =====================================================
+
+        return NotificationContext.builder()
+                .event(notificationEvent)
+                .companyId(company.getId())
+                .userEmailAddress(user.getEmail())
+                .variables(variables)
+                .build();
+    }
+
+private Set<NotificationPlaceholder> resolvePlaceholders(
+        NotificationEvent event
+) {
+
+    return switch (event) {
+
+        case CANDIDATE_INVITE -> EnumSet.of(
+
+                NotificationPlaceholder.CANDIDATE_NAME,
+                NotificationPlaceholder.CANDIDATE_EMAIL,
+
+                NotificationPlaceholder.EMPLOYER_BRAND_NAME,
+                NotificationPlaceholder.EMPLOYER_LEGAL_NAME,
+                NotificationPlaceholder.EMPLOYER_SUPPORT_EMAIL,
+
+                NotificationPlaceholder.PLATFORM_BRAND_NAME,
+                NotificationPlaceholder.PLATFORM_LEGAL_NAME,
+                NotificationPlaceholder.PLATFORM_SUPPORT_EMAIL,
+
+                NotificationPlaceholder.VERIFICATION_LINK,
+                NotificationPlaceholder.VERIFICATION_LINK_EXPIRY_DATE,
+
+                NotificationPlaceholder.CURRENT_YEAR
+        );
+
+
+        case CANDIDATE_ACTION_REQUIRED -> EnumSet.of(
+
+                NotificationPlaceholder.CANDIDATE_NAME,
+                NotificationPlaceholder.CANDIDATE_EMAIL,
+
+                NotificationPlaceholder.EMPLOYER_BRAND_NAME,
+                NotificationPlaceholder.EMPLOYER_SUPPORT_EMAIL,
+
+                NotificationPlaceholder.PLATFORM_BRAND_NAME,
+
+                NotificationPlaceholder.VERIFICATION_LINK,
+
+                NotificationPlaceholder.CURRENT_YEAR
+        );
+
+
+        default -> throw new IllegalArgumentException(
+                "Unsupported Candidate notification event: "
+                        + event
+        );
+    };
+}
+
+
+CANDIDATE_INVITE
+    ├── candidate name
+    ├── candidate email
+    ├── employer name
+    ├── verification link
+    ├── expiry date
+    └── current year
+
+
+CANDIDATE_ACTION_REQUIRED
+    ├── candidate name
+    ├── employer name
+    ├── verification link
+    └── current year
+
+
+private Map<String, Object> resolveRuntimeValues(
+        NotificationEvent event,
+        Candidate candidate,
+        User user
+) {
+
+    Map<String, Object> values = new HashMap<>();
+
+    switch (event) {
+
+        case CANDIDATE_INVITE -> {
+
+            String resetLink =
+                    resetTokenService.generateResetLink(
+                            user.getUserId()
+                    );
+
+            values.put(
+                    NotificationPlaceholder.VERIFICATION_LINK.key(),
+                    resetLink
+            );
+
+            values.put(
+                    NotificationPlaceholder
+                            .VERIFICATION_LINK_EXPIRY_DATE
+                            .key(),
+                    ""
+            );
+        }
+
+
+        case CANDIDATE_ACTION_REQUIRED -> {
+
+            String actionLink =
+                    resetTokenService.generateResetLink(
+                            user.getUserId()
+                    );
+
+            values.put(
+                    NotificationPlaceholder.VERIFICATION_LINK.key(),
+                    actionLink
+            );
+        }
+
+
+        default -> throw new IllegalArgumentException(
+                "Unsupported Candidate notification event: "
+                        + event
+        );
+    }
+
+    return values;
+}
+
+
+@Component
+@RequiredArgsConstructor
+public class WorkflowNotificationContextResolver {
+
+    private final List<NotificationContextProvider> providers;
+
+
+    public NotificationContext resolve(
+            WorkflowNotificationEvent workflowEvent
+    ) {
+
+        NotificationEvent notificationEvent =
+                NotificationEvent.valueOf(
+                        workflowEvent.getNotificationEvent()
+                );
+
+
+        NotificationContextProvider provider =
+                providers.stream()
+                        .filter(p ->
+                                p.supports(
+                                        workflowEvent.getEntityType()
+                                )
+                        )
+                        .findFirst()
+                        .orElseThrow(() ->
+                                new IllegalStateException(
+                                        "No notification provider for entity type: "
+                                                + workflowEvent.getEntityType()
+                                )
+                        );
+
+
+        return provider.build(
+                workflowEvent,
+                notificationEvent
+        );
+    }
+}
+
+
+
+Now providers are organized by business domain:
+
+Plain Text
+NotificationContextProvider
+│
+├── CandidateNotificationContextProvider
+│
+├── InvoiceNotificationContextProvider
+│
+├── PurchaseOrderNotificationContextProvider
+│
+└── EmployeeNotificationContextProvider
+Show more lines
+
+And each provider supports multiple events:
+
+Plain Text
+CandidateNotificationContextProvider
+│
+├── CANDIDATE_INVITE
+├── CANDIDATE_ACTION_REQUIRED
+├── CANDIDATE_REMINDER
+└── BGV_COMPLETED
+
+
+
+WORKFLOW
+================================================
+
+entityType = CANDIDATE
+entityId = 1001
+
+Transition:
+REQUEST_ACTION
+
+Notification:
+CANDIDATE_ACTION_REQUIRED
+
+
+                 ↓
+
+
+NOTIFICATION DOMAIN
+================================================
+
+CandidateNotificationContextProvider
+
+        ↓
+
+Load Candidate 1001
+
+        ↓
+
+Build resolution context
+
+Candidate
+Company
+User
+Runtime Values
+
+        ↓
+
+PlaceholderEngine
+
+        ↓
+
+NotificationContext
+
+        ↓
+
+NotificationDispatcherService
+
+        ↓
+
+NotificationPolicyResolver
+
+        ↓
+
+       Recipients
+
+   ┌──────┼──────┐
+   ▼      ▼      ▼
+ EMAIL   SMS   IN_APP
